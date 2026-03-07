@@ -1,6 +1,5 @@
-openai
 chromadb
-python-dotenv
+ollama
 pypdf
-tiktoken
+streamlit
 numpy
