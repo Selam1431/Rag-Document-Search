@@ -1,8 +1,9 @@
 import ollama
 
+
 def ask_rag(collection):
     while True:
-        query = input("Ask a question (or type 'exit'): ")
+        query = input("Ask a question (or type 'exit'): ").strip()
 
         if query.lower() == "exit":
             print("Goodbye!")
@@ -15,20 +16,22 @@ def ask_rag(collection):
 
         results = collection.query(
             query_embeddings=[query_embedding],
-            n_results=1
+            n_results=3
         )
 
-        best_chunk = results["documents"][0][0]
+        retrieved_chunks = results["documents"][0]
+        context = "\n\n".join(retrieved_chunks)
 
-        print("\nBest Matching Chunk:")
-        print(best_chunk)
+        print("\nBest Matching Context:\n")
+        print(context[:600])  # only show part so terminal is cleaner
 
         prompt = f"""
 You are a helpful AI assistant.
 Answer the user's question using only the context below.
+Keep the answer short, clear, and direct.
 
 Context:
-{best_chunk}
+{context}
 
 Question:
 {query}
@@ -41,6 +44,6 @@ Question:
             ]
         )
 
-        print("\nFinal Answer:")
+        print("\nFinal Answer:\n")
         print(answer["message"]["content"])
         print("\n" + "-" * 50 + "\n")

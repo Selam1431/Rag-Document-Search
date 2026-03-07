@@ -1,31 +1,33 @@
 import chromadb
 import ollama
 
+
 def store_embeddings(documents):
     client = chromadb.PersistentClient(path="chroma_db")
 
     try:
-        collection = client.get_collection(name="documents")
+        client.delete_collection(name="documents")
     except:
-        collection = client.create_collection(name="documents")
+        pass
 
-        for doc in documents:
-            text = doc["text"]
-            doc_id = doc["id"]
+    collection = client.create_collection(name="documents")
 
-            response = ollama.embeddings(
-                model="nomic-embed-text",
-                prompt=text
-            )
+    for doc in documents:
+        text = doc["text"]
+        doc_id = doc["id"]
 
-            embedding = response["embedding"]
+        response = ollama.embeddings(
+            model="nomic-embed-text",
+            prompt=text
+        )
 
-            collection.add(
-                documents=[text],
-                embeddings=[embedding],
-                ids=[doc_id]
-            )
+        embedding = response["embedding"]
 
-        print("Documents embedded and stored!")
+        collection.add(
+            documents=[text],
+            embeddings=[embedding],
+            ids=[doc_id]
+        )
 
+    print("Documents embedded and stored!")
     return collection
