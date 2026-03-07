@@ -1,0 +1,5 @@
+Artificial Intelligence (AI) is a field of computer science focused on building systems that can perform tasks that normally require human intelligence.
+
+Machine learning is a subset of AI that allows computers to learn patterns from data without being explicitly programmed.
+
+Deep learning uses neural networks with many layers to analyze complex data such as images, speech, and text.
