@@ -3,3 +3,4 @@ ollama
 pypdf
 streamlit
 numpy
+python-dotenv

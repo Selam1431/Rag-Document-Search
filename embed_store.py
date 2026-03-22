@@ -1,9 +1,6 @@
 import ollama
 import chromadb
-
-COLLECTION_NAME = "documents"
-EMBED_MODEL = "nomic-embed-text"
-CHROMA_PATH = "./chroma_db"
+from config import COLLECTION_NAME, EMBED_MODEL, CHROMA_PATH
 
 
 def store_embeddings(documents):

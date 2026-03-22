@@ -7,14 +7,10 @@ import ollama
 import streamlit as st
 from pypdf import PdfReader
 
-CHROMA_PATH = "./chroma_db"
-COLLECTION_NAME = "documents"
-EMBED_MODEL = "nomic-embed-text"
-LLM_MODEL = "gemma3:4b"
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 100
-MAX_QUERY_LENGTH = 500
-MAX_FILE_SIZE_MB = 50
+from config import (
+    CHROMA_PATH, COLLECTION_NAME, EMBED_MODEL, LLM_MODEL,
+    CHUNK_SIZE, CHUNK_OVERLAP, MAX_QUERY_LENGTH, MAX_FILE_SIZE_MB
+)
 
 st.set_page_config(
     page_title="AI Document Chat",

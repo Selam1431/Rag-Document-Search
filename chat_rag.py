@@ -1,8 +1,5 @@
 import ollama
-
-EMBED_MODEL = "nomic-embed-text"
-LLM_MODEL = "gemma3:4b"
-MAX_QUERY_LENGTH = 500
+from config import EMBED_MODEL, LLM_MODEL, MAX_QUERY_LENGTH
 
 
 def sanitize_query(query):
