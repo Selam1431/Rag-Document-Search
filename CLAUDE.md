@@ -2,7 +2,20 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Backends
+
+The app supports two backend modes selected by env vars:
+
+| Backend | LLM | Embeddings | When |
+|---|---|---|---|
+| **Cloud** | Groq (`llama-3.1-8b-instant`) | Cohere (`embed-english-v3.0`) | `GROQ_API_KEY` + `COHERE_API_KEY` set |
+| **Local** | Ollama (`gemma3:4b`) | Ollama (`nomic-embed-text`) | No API keys set |
+
+Cloud mode is required for Render deployment. Local mode requires Ollama running.
+
 ## Setup
+
+### Local (Ollama)
 
 Requires Ollama running locally with two models:
 
@@ -18,6 +31,10 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
+
+### Cloud (Groq + Cohere)
+
+Set `GROQ_API_KEY` and `COHERE_API_KEY` in `.env` — no Ollama needed.
 
 ## Commands
 
@@ -63,7 +80,8 @@ python -m pytest tests/ -v
 - **Persistent ChromaDB**: `PersistentClient(path=CHROMA_PATH)` — embeddings survive restarts. Per-document replacement: existing chunks for a `source` are deleted before re-embedding.
 - **Metadata on every chunk**: `source` (filename), `uploaded_at` (UTC ISO), `chunk_index` stored in ChromaDB for attribution and per-document deletion.
 - **Concurrent embedding**: `embed_chunks_concurrent()` uses `ThreadPoolExecutor(max_workers=4)` with an optional `progress_callback` for the UI progress bar.
-- **Streaming**: `stream_answer()` is a generator yielding tokens from `ollama.chat(stream=True)`. Web UI uses `st.write_stream()`, CLI writes to `sys.stdout` directly.
+- **Dual-backend streaming**: `stream_answer()` branches on `GROQ_API_KEY` — Groq SDK if set, `ollama.chat(stream=True)` otherwise. Web UI uses `st.write_stream()`, CLI writes to `sys.stdout` directly.
+- **Dual-backend embedding**: `embed_text()` / `embed_chunks_concurrent()` use Cohere batch API (single HTTP call) if `COHERE_API_KEY` set, else concurrent Ollama via `ThreadPoolExecutor`.
 - **Auth**: Optional — only active when `APP_PASSWORD` env var is non-empty. Uses `st.session_state.authenticated`.
 - **Rate limiting**: Sliding 60-second window tracked in `st.session_state.request_times`.
 
@@ -71,8 +89,10 @@ python -m pytest tests/ -v
 
 All tunable values live in `.env` (gitignored) and are loaded once by `config.py`. `.env.example` is the committed template. Never hardcode model names, paths, or limits in module files — always import from `config`.
 
-Key variables: `LLM_MODEL`, `EMBED_MODEL`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `MAX_FILE_SIZE_MB`, `MAX_QUERY_LENGTH`, `RATE_LIMIT_PER_MINUTE`, `MAX_HISTORY_TURNS`, `APP_PASSWORD`, `LOG_LEVEL`, `CHROMA_PATH`, `OLLAMA_BASE_URL`.
+Key variables: `LLM_MODEL`, `EMBED_MODEL`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `MAX_FILE_SIZE_MB`, `MAX_QUERY_LENGTH`, `RATE_LIMIT_PER_MINUTE`, `MAX_HISTORY_TURNS`, `APP_PASSWORD`, `LOG_LEVEL`, `CHROMA_PATH`, `OLLAMA_BASE_URL`, `GROQ_API_KEY`, `GROQ_MODEL`, `COHERE_API_KEY`.
 
-### Docker
+### Docker / Render
 
-`Dockerfile` builds the app image. `docker-compose.yml` runs both the app and an Ollama container together with named volumes for ChromaDB and Ollama model data. `.dockerignore` excludes `.env`, `venv/`, `chroma_db/`, and `.git/` from the build context.
+`Dockerfile` builds the app image (python:3.12-slim). `docker-compose.yml` runs both the app and an Ollama container together with named volumes for ChromaDB and Ollama model data. `.dockerignore` excludes `.env`, `venv/`, `chroma_db/`, and `.git/`.
+
+`render.yaml` configures a free-tier Render web service using Docker. `GROQ_API_KEY` and `COHERE_API_KEY` are `sync: false` (must be set in the Render dashboard). `CHROMA_PATH` is `/tmp/chroma_db` (ephemeral on free tier).

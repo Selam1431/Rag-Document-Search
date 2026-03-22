@@ -11,7 +11,8 @@ import streamlit as st
 from config import (
     CHROMA_PATH, COLLECTION_NAME, EMBED_MODEL, LLM_MODEL,
     MAX_QUERY_LENGTH, MAX_FILE_SIZE_MB, OLLAMA_BASE_URL,
-    APP_PASSWORD, RATE_LIMIT_PER_MINUTE, MAX_HISTORY_TURNS
+    APP_PASSWORD, RATE_LIMIT_PER_MINUTE, MAX_HISTORY_TURNS,
+    GROQ_API_KEY, COHERE_API_KEY
 )
 from logger import setup_logging
 from rag_core import (
@@ -96,16 +97,27 @@ def delete_source(collection, source: str):
         logger.info("Deleted %d chunks for: %s", len(existing["ids"]), source)
 
 
-def check_ollama():
+def check_backends():
+    """Returns True if backends are ready, a str error message otherwise."""
+    using_cloud = GROQ_API_KEY and COHERE_API_KEY
+    if using_cloud:
+        return True  # validated at query time; avoid slow startup checks
+
+    # Ollama mode
     try:
         resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=3)
         if resp.status_code != 200:
-            return False
+            return f"Ollama returned status {resp.status_code}."
         models = [m["name"] for m in resp.json().get("models", [])]
         missing = [m for m in (EMBED_MODEL, LLM_MODEL) if not any(m in n for n in models)]
-        return missing if missing else True
+        if missing:
+            return (
+                f"Missing Ollama models: {', '.join(missing)}. "
+                f"Run: `ollama pull {' && ollama pull '.join(missing)}`"
+            )
+        return True
     except requests.exceptions.ConnectionError:
-        return None
+        return f"Cannot connect to Ollama at `{OLLAMA_BASE_URL}`. Run: `ollama serve`"
 
 
 def validate_file(uploaded_file):
@@ -261,19 +273,17 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    st.caption(f"Model: {LLM_MODEL}  \nEmbed: {EMBED_MODEL}")
+    if GROQ_API_KEY and COHERE_API_KEY:
+        from config import GROQ_MODEL
+        st.caption(f"LLM: {GROQ_MODEL} (Groq)  \nEmbed: embed-english-v3.0 (Cohere)")
+    else:
+        st.caption(f"LLM: {LLM_MODEL} (Ollama)  \nEmbed: {EMBED_MODEL} (Ollama)")
 
 # ── Ollama health check ───────────────────────────────────────────────────────
 
-ollama_status = check_ollama()
-if ollama_status is None:
-    st.error(f"Cannot connect to Ollama at `{OLLAMA_BASE_URL}`. Run: `ollama serve`")
-    st.stop()
-elif isinstance(ollama_status, list):
-    st.error(
-        f"Missing Ollama models: {', '.join(ollama_status)}. "
-        f"Run: `ollama pull {' && ollama pull '.join(ollama_status)}`"
-    )
+backend_status = check_backends()
+if backend_status is not True:
+    st.error(backend_status)
     st.stop()
 
 # ── Main area ─────────────────────────────────────────────────────────────────

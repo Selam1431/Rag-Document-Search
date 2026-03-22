@@ -15,3 +15,8 @@ MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", 50))
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")          # empty = no auth
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", 20))
 MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", 10))  # user+assistant pairs
+
+# Cloud API keys — when set, Groq/Cohere are used instead of Ollama
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+COHERE_API_KEY = os.getenv("COHERE_API_KEY", "")

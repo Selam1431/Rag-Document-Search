@@ -1,5 +1,9 @@
 """
 Shared RAG utilities used by all entry points (streamlit_app, embed_store, chat_rag).
+
+Backends:
+  - Embeddings: Cohere API if COHERE_API_KEY is set, else Ollama
+  - LLM:        Groq API  if GROQ_API_KEY  is set, else Ollama
 """
 import logging
 import re
@@ -10,10 +14,15 @@ from typing import Generator
 import ollama
 from pypdf import PdfReader
 
-from config import CHUNK_SIZE, CHUNK_OVERLAP, EMBED_MODEL, LLM_MODEL
+from config import (
+    CHUNK_SIZE, CHUNK_OVERLAP, EMBED_MODEL, LLM_MODEL,
+    GROQ_API_KEY, GROQ_MODEL, COHERE_API_KEY
+)
 
 logger = logging.getLogger(__name__)
 
+
+# ── Text processing ────────────────────────────────────────────────────────────
 
 def extract_text_from_pdf(path: str) -> str:
     reader = PdfReader(path)
@@ -45,14 +54,12 @@ def split_into_chunks(text: str) -> list:
             if current:
                 chunks.append(current)
             if len(sentence) > CHUNK_SIZE:
-                # Sentence longer than chunk size — fall back to character chunking
                 start = 0
                 while start < len(sentence):
                     chunks.append(sentence[start:start + CHUNK_SIZE])
                     start += CHUNK_SIZE - CHUNK_OVERLAP
                 current = ""
             else:
-                # Overlap: seed next chunk with end of previous
                 overlap = chunks[-1][-CHUNK_OVERLAP:] if chunks else ""
                 current = (overlap + " " + sentence).strip() if overlap else sentence
 
@@ -64,37 +71,67 @@ def split_into_chunks(text: str) -> list:
     return result
 
 
-def embed_text(text: str) -> list:
+# ── Embedding ──────────────────────────────────────────────────────────────────
+
+def embed_text(text: str, input_type: str = "search_query") -> list:
+    """Embed a single text string. input_type: 'search_query' or 'search_document'."""
+    if COHERE_API_KEY:
+        import cohere
+        co = cohere.ClientV2(api_key=COHERE_API_KEY)
+        resp = co.embed(
+            texts=[text],
+            model="embed-english-v3.0",
+            input_type=input_type,
+            embedding_types=["float"]
+        )
+        return list(resp.embeddings.float_[0])
     return ollama.embeddings(model=EMBED_MODEL, prompt=text)["embedding"]
 
 
 def embed_chunks_concurrent(chunks: list, max_workers: int = 4, progress_callback=None) -> list:
-    """Embed all chunks in parallel. Calls progress_callback(done, total) after each chunk."""
-    logger.info("Embedding %d chunks with %d workers", len(chunks), max_workers)
+    """Embed all chunks. Uses Cohere batch API (1 call) or concurrent Ollama calls."""
+    logger.info("Embedding %d chunks", len(chunks))
     t0 = time.time()
-    results = [None] * len(chunks)
-    completed = 0
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(embed_text, chunk): i for i, chunk in enumerate(chunks)}
-        for future in as_completed(futures):
-            i = futures[future]
-            results[i] = future.result()
-            completed += 1
-            if progress_callback:
-                progress_callback(completed, len(chunks))
+    if COHERE_API_KEY:
+        import cohere
+        co = cohere.ClientV2(api_key=COHERE_API_KEY)
+        resp = co.embed(
+            texts=chunks,
+            model="embed-english-v3.0",
+            input_type="search_document",
+            embedding_types=["float"]
+        )
+        results = [list(e) for e in resp.embeddings.float_]
+        if progress_callback:
+            progress_callback(len(chunks), len(chunks))
+    else:
+        results = [None] * len(chunks)
+        completed = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(embed_text, chunk, "search_document"): i
+                for i, chunk in enumerate(chunks)
+            }
+            for future in as_completed(futures):
+                i = futures[future]
+                results[i] = future.result()
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed, len(chunks))
 
-    elapsed = time.time() - t0
-    logger.info("Embedded %d chunks in %.2fs", len(chunks), elapsed)
+    logger.info("Embedded %d chunks in %.2fs", len(chunks), time.time() - t0)
     return results
 
+
+# ── Prompt building ────────────────────────────────────────────────────────────
 
 def make_metadata(source: str, uploaded_at: str, chunk_index: int) -> dict:
     return {"source": source, "uploaded_at": uploaded_at, "chunk_index": chunk_index}
 
 
 def build_messages(context: str, query: str, history: list = None) -> list:
-    """Build the messages list for ollama.chat, injecting context and conversation history."""
+    """Build the messages list for the LLM, injecting context and conversation history."""
     system_content = (
         "You are a helpful AI assistant. "
         "Answer questions using only the context below. "
@@ -120,22 +157,51 @@ def build_prompt(context: str, query: str) -> str:
     )
 
 
+# ── LLM inference ──────────────────────────────────────────────────────────────
+
 def stream_answer(messages: list) -> Generator[str, None, None]:
-    """Generator that streams tokens from the LLM."""
-    logger.info("Streaming response from LLM (%s)", LLM_MODEL)
+    """Generator that streams tokens from the LLM (Groq or Ollama)."""
     t0 = time.time()
-    stream = ollama.chat(model=LLM_MODEL, messages=messages, stream=True)
-    for chunk in stream:
-        token = chunk["message"]["content"]
-        if token:
-            yield token
+
+    if GROQ_API_KEY:
+        from groq import Groq
+        logger.info("Streaming from Groq (%s)", GROQ_MODEL)
+        client = Groq(api_key=GROQ_API_KEY)
+        stream = client.chat.completions.create(
+            model=GROQ_MODEL, messages=messages, stream=True
+        )
+        for chunk in stream:
+            token = chunk.choices[0].delta.content or ""
+            if token:
+                yield token
+    else:
+        logger.info("Streaming from Ollama (%s)", LLM_MODEL)
+        stream = ollama.chat(model=LLM_MODEL, messages=messages, stream=True)
+        for chunk in stream:
+            token = chunk["message"]["content"]
+            if token:
+                yield token
+
     logger.info("LLM stream finished in %.2fs", time.time() - t0)
 
 
 def generate_answer(prompt: str) -> str:
     """Non-streaming answer (used by CLI path)."""
-    logger.info("Sending prompt to LLM (%s)", LLM_MODEL)
     t0 = time.time()
-    response = ollama.chat(model=LLM_MODEL, messages=[{"role": "user", "content": prompt}])
+
+    if GROQ_API_KEY:
+        from groq import Groq
+        logger.info("Generating answer via Groq (%s)", GROQ_MODEL)
+        client = Groq(api_key=GROQ_API_KEY)
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        result = response.choices[0].message.content
+    else:
+        logger.info("Generating answer via Ollama (%s)", LLM_MODEL)
+        response = ollama.chat(model=LLM_MODEL, messages=[{"role": "user", "content": prompt}])
+        result = response["message"]["content"]
+
     logger.info("LLM responded in %.2fs", time.time() - t0)
-    return response["message"]["content"]
+    return result

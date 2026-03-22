@@ -1,6 +1,6 @@
 # AI Document Chat (RAG)
 
-A local Retrieval-Augmented Generation system for uploading documents and having a streamed, multi-turn conversation about their contents — fully offline using Ollama.
+A Retrieval-Augmented Generation system for uploading documents and having a streamed, multi-turn conversation about their contents. Runs fully offline with Ollama or in the cloud with Groq + Cohere — deploy free to [Render](https://render.com).
 
 ![AI Document Chat Demo](assets/rag-demo.png)
 
@@ -10,10 +10,10 @@ A local Retrieval-Augmented Generation system for uploading documents and having
 
 - Upload PDF or DOCX documents (up to 50MB, magic-byte validated)
 - Sentence-aware text chunking for better retrieval quality
-- Local embeddings via `nomic-embed-text` (Ollama)
+- Embeddings via **Cohere** API (cloud) or `nomic-embed-text` (Ollama, local)
 - Persistent vector store with ChromaDB (survives restarts)
 - Multi-document support — each document stored independently, deletable from sidebar
-- Streaming LLM answers (token-by-token) via `gemma3:4b` (Ollama)
+- Streaming LLM answers (token-by-token) via **Groq** (cloud) or `gemma3:4b` (Ollama, local)
 - Multi-turn chat with conversation history passed to the LLM
 - Similarity scores shown for each retrieved context chunk
 - Concurrent embedding (4 workers) with live progress bar
@@ -28,8 +28,10 @@ A local Retrieval-Augmented Generation system for uploading documents and having
 
 - Python 3.12+
 - [Streamlit](https://streamlit.io)
-- [Ollama](https://ollama.com) — local LLM and embedding inference
 - [ChromaDB](https://www.trychroma.com) — persistent vector database
+- [Groq](https://groq.com) — cloud LLM inference (free tier available)
+- [Cohere](https://cohere.com) — cloud embeddings (free tier available)
+- [Ollama](https://ollama.com) — local LLM and embedding inference (offline alternative)
 - [PyPDF](https://pypdf.readthedocs.io) — PDF text extraction
 - [python-docx](https://python-docx.readthedocs.io) — DOCX text extraction
 
@@ -99,6 +101,38 @@ The app will be available at `http://localhost:8501`. ChromaDB and Ollama model 
 
 ---
 
+## Deploy to Render (free, cloud)
+
+This project ships with a `render.yaml` for one-click deployment on Render's free tier using **Groq** (LLM) and **Cohere** (embeddings) — no Ollama required.
+
+### 1. Get API keys
+
+- **Groq** — sign up at [console.groq.com](https://console.groq.com), create an API key (free tier supports `llama-3.1-8b-instant`)
+- **Cohere** — sign up at [dashboard.cohere.com](https://dashboard.cohere.com), create an API key (free trial includes 1000 embed calls/month)
+
+### 2. Fork and connect to Render
+
+1. Fork this repo to your GitHub account
+2. Go to [dashboard.render.com](https://dashboard.render.com) → **New → Web Service**
+3. Connect your GitHub account and select the forked repo
+4. Render will auto-detect `render.yaml` — click **Apply**
+
+### 3. Set secret environment variables
+
+In the Render dashboard for your service → **Environment**:
+
+| Variable | Value |
+|---|---|
+| `GROQ_API_KEY` | your Groq API key |
+| `COHERE_API_KEY` | your Cohere API key |
+| `APP_PASSWORD` | _(optional)_ set to enable password auth |
+
+Click **Save Changes** — Render will redeploy automatically.
+
+> **Note:** The free tier uses ephemeral storage (`/tmp/chroma_db`). Uploaded documents will be lost on restart. Upgrade to a paid plan or attach a persistent disk to retain them.
+
+---
+
 ## Configuration
 
 All settings are in `.env`. Key options:
@@ -116,3 +150,6 @@ All settings are in `.env`. Key options:
 | `MAX_HISTORY_TURNS` | `10` | Max conversation turns kept in LLM context |
 | `LOG_LEVEL` | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`) |
 | `CHROMA_PATH` | `./chroma_db` | Where ChromaDB persists data |
+| `GROQ_API_KEY` | _(empty)_ | Groq API key — activates Groq LLM backend |
+| `GROQ_MODEL` | `llama-3.1-8b-instant` | Groq model name |
+| `COHERE_API_KEY` | _(empty)_ | Cohere API key — activates Cohere embedding backend |
