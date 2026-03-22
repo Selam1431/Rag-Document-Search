@@ -1,8 +1,20 @@
-import streamlit as st
-import ollama
-import chromadb
-from pypdf import PdfReader
+import os
+import re
 import tempfile
+
+import chromadb
+import ollama
+import streamlit as st
+from pypdf import PdfReader
+
+CHROMA_PATH = "./chroma_db"
+COLLECTION_NAME = "documents"
+EMBED_MODEL = "nomic-embed-text"
+LLM_MODEL = "gemma3:4b"
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 100
+MAX_QUERY_LENGTH = 500
+MAX_FILE_SIZE_MB = 50
 
 st.set_page_config(
     page_title="AI Document Chat",
@@ -202,52 +214,64 @@ with right:
     """, unsafe_allow_html=True)
 
 if uploaded_file:
+    if uploaded_file.size > MAX_FILE_SIZE_MB * 1024 * 1024:
+        st.error(f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB.")
+        st.stop()
+
     with st.spinner("Processing document..."):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-            tmp_file.write(uploaded_file.read())
-            temp_path = tmp_file.name
-
-        reader = PdfReader(temp_path)
-        text = ""
-
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text.replace("\n", " ") + " "
-
-        text = " ".join(text.split())
-
-        chunk_size = 500
-        overlap = 100
-        chunks = []
-
-        start = 0
-        while start < len(text):
-            end = start + chunk_size
-            chunk = text[start:end]
-            chunks.append(chunk)
-            start += chunk_size - overlap
-
-        client = chromadb.Client()
-
+        temp_path = None
         try:
-            client.delete_collection(name="documents")
-        except:
-            pass
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                tmp_file.write(uploaded_file.read())
+                temp_path = tmp_file.name
 
-        collection = client.create_collection(name="documents")
+            reader = PdfReader(temp_path)
+            text = ""
 
-        for i, chunk in enumerate(chunks):
-            embedding = ollama.embeddings(
-                model="nomic-embed-text",
-                prompt=chunk
-            )["embedding"]
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text.replace("\n", " ") + " "
 
-            collection.add(
-                documents=[chunk],
-                embeddings=[embedding],
-                ids=[str(i)]
-            )
+            text = " ".join(text.split())
+
+            if not text.strip():
+                st.error("Could not extract text from this PDF. It may be scanned or password-protected.")
+                st.stop()
+
+            chunks = []
+            start = 0
+            while start < len(text):
+                end = start + CHUNK_SIZE
+                chunks.append(text[start:end])
+                start += CHUNK_SIZE - CHUNK_OVERLAP
+
+            client = chromadb.PersistentClient(path=CHROMA_PATH)
+
+            try:
+                client.delete_collection(name=COLLECTION_NAME)
+            except chromadb.errors.NotFoundError:
+                pass
+
+            collection = client.create_collection(name=COLLECTION_NAME)
+
+            for i, chunk in enumerate(chunks):
+                embedding = ollama.embeddings(
+                    model=EMBED_MODEL,
+                    prompt=chunk
+                )["embedding"]
+
+                collection.add(
+                    documents=[chunk],
+                    embeddings=[embedding],
+                    ids=[str(i)]
+                )
+        except Exception as e:
+            st.error(f"Failed to process document: {e}")
+            st.stop()
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
 
     st.success("Document processed successfully. Ask a question below.")
 
@@ -271,45 +295,53 @@ if uploaded_file:
         """, unsafe_allow_html=True)
 
     if query:
-        with st.spinner("Searching and generating answer..."):
-            query_embedding = ollama.embeddings(
-                model="nomic-embed-text",
-                prompt=query
-            )["embedding"]
+        query = query.strip()
+        if len(query) > MAX_QUERY_LENGTH:
+            st.error(f"Query too long. Maximum {MAX_QUERY_LENGTH} characters.")
+        elif not re.search(r'\w', query):
+            st.error("Query must contain at least one word.")
+        else:
+            with st.spinner("Searching and generating answer..."):
+                try:
+                    query_embedding = ollama.embeddings(
+                        model=EMBED_MODEL,
+                        prompt=query
+                    )["embedding"]
 
-            results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=3
-            )
+                    results = collection.query(
+                        query_embeddings=[query_embedding],
+                        n_results=3
+                    )
 
-            retrieved_chunks = results["documents"][0]
-            context = "\n\n".join(retrieved_chunks)
+                    docs = results.get("documents", [[]])
+                    if not docs or not docs[0]:
+                        st.warning("No relevant context found for your query.")
+                    else:
+                        retrieved_chunks = docs[0]
+                        context = "\n\n".join(retrieved_chunks)
 
-            prompt = f"""
-You are a helpful AI assistant.
-Answer the user's question using only the context below.
-Keep the answer clear, concise, and professional.
+                        prompt = (
+                            "You are a helpful AI assistant.\n"
+                            "Answer the user's question using only the context below.\n"
+                            "Keep the answer clear, concise, and professional.\n"
+                            "If the context does not contain enough information, say so.\n\n"
+                            f"Context:\n{context}\n\n"
+                            f"Question:\n{query}"
+                        )
 
-Context:
-{context}
+                        response = ollama.chat(
+                            model=LLM_MODEL,
+                            messages=[{"role": "user", "content": prompt}]
+                        )
 
-Question:
-{query}
-"""
+                        answer = response["message"]["content"]
 
-            response = ollama.chat(
-                model="gemma3:4b",
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
+                        st.markdown('<div class="section-label">Answer</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="answer-box">{answer}</div>', unsafe_allow_html=True)
 
-            answer = response["message"]["content"]
-
-        st.markdown('<div class="section-label">Answer</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="answer-box">{answer}</div>', unsafe_allow_html=True)
-
-        with st.expander("View Retrieved Context"):
-            st.write(context)
+                        with st.expander("View Retrieved Context"):
+                            st.write(context)
+                except Exception as e:
+                    st.error(f"Failed to generate answer: {e}")
 
 st.markdown('<div class="footer-note">Built with Streamlit, Ollama, and ChromaDB</div>', unsafe_allow_html=True)

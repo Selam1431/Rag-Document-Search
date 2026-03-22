@@ -1,16 +1,34 @@
 import ollama
 
+EMBED_MODEL = "nomic-embed-text"
+LLM_MODEL = "gemma3:4b"
+MAX_QUERY_LENGTH = 500
+
+
+def sanitize_query(query):
+    query = query.strip()
+    if not query:
+        return None, "Query cannot be empty."
+    if len(query) > MAX_QUERY_LENGTH:
+        return None, f"Query too long. Maximum {MAX_QUERY_LENGTH} characters allowed."
+    return query, None
+
 
 def ask_rag(collection):
     while True:
-        query = input("Ask a question (or type 'exit'): ").strip()
+        raw_query = input("Ask a question (or type 'exit'): ")
 
-        if query.lower() == "exit":
+        if raw_query.strip().lower() == "exit":
             print("Goodbye!")
             break
 
+        query, error = sanitize_query(raw_query)
+        if error:
+            print(f"Error: {error}\n")
+            continue
+
         query_embedding = ollama.embeddings(
-            model="nomic-embed-text",
+            model=EMBED_MODEL,
             prompt=query
         )["embedding"]
 
@@ -19,29 +37,29 @@ def ask_rag(collection):
             n_results=3
         )
 
-        retrieved_chunks = results["documents"][0]
+        docs = results.get("documents", [[]])
+        if not docs or not docs[0]:
+            print("No relevant context found for your query.\n")
+            continue
+
+        retrieved_chunks = docs[0]
         context = "\n\n".join(retrieved_chunks)
 
         print("\nBest Matching Context:\n")
-        print(context[:600])  # only show part so terminal is cleaner
+        print(context[:600])
 
-        prompt = f"""
-You are a helpful AI assistant.
-Answer the user's question using only the context below.
-Keep the answer short, clear, and direct.
-
-Context:
-{context}
-
-Question:
-{query}
-"""
+        prompt = (
+            "You are a helpful AI assistant.\n"
+            "Answer the user's question using only the context below.\n"
+            "Keep the answer short, clear, and direct.\n"
+            "If the context does not contain enough information, say so.\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question:\n{query}"
+        )
 
         answer = ollama.chat(
-            model="gemma3:4b",
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": prompt}]
         )
 
         print("\nFinal Answer:\n")
