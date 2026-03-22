@@ -8,14 +8,14 @@ import requests
 import streamlit as st
 
 from config import (
-    CHROMA_PATH, COLLECTION_NAME, EMBED_MODEL, LLM_MODEL,
+    CHROMA_PATH, COLLECTION_NAME,
     MAX_QUERY_LENGTH, MAX_FILE_SIZE_MB, OLLAMA_BASE_URL
 )
 from logger import setup_logging
 from rag_core import (
     extract_text_from_pdf, split_into_chunks,
     embed_chunks_concurrent, embed_text,
-    build_prompt, generate_answer
+    build_prompt, generate_answer, make_metadata
 )
 
 setup_logging()
@@ -153,24 +153,48 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def get_chroma_collection():
+    client = chromadb.PersistentClient(path=CHROMA_PATH)
+    try:
+        return client.get_collection(name=COLLECTION_NAME)
+    except chromadb.errors.NotFoundError:
+        return client.create_collection(name=COLLECTION_NAME)
+
+
+def list_sources(collection) -> list:
+    all_docs = collection.get(include=["metadatas"])
+    sources = {}
+    for meta in all_docs.get("metadatas") or []:
+        if meta and "source" in meta:
+            sources[meta["source"]] = meta.get("uploaded_at", "unknown")
+    return [(src, ts) for src, ts in sorted(sources.items())]
+
+
+def delete_source(collection, source: str):
+    existing = collection.get(where={"source": source})
+    if existing["ids"]:
+        collection.delete(ids=existing["ids"])
+        logger.info("Deleted %d chunks for source: %s", len(existing["ids"]), source)
+
+
 with st.sidebar:
-    st.markdown("## 🤖 AI Document Chat")
-    st.write("A portfolio-ready RAG app for searching and chatting with PDF documents.")
+    st.markdown("## AI Document Chat")
     st.markdown("---")
-    st.markdown("### Tech Stack")
-    st.write("• Python")
-    st.write("• Ollama")
-    st.write("• ChromaDB")
-    st.write("• Streamlit")
-    st.write("• PyPDF")
+    st.markdown("### Uploaded Documents")
+    collection = get_chroma_collection()
+    sources = list_sources(collection)
+    if not sources:
+        st.caption("No documents uploaded yet.")
+    else:
+        for src, ts in sources:
+            col_a, col_b = st.columns([3, 1])
+            col_a.markdown(f"**{src}**")
+            col_a.caption(ts[:19].replace("T", " ") if ts != "unknown" else "")
+            if col_b.button("Del", key=f"del_{src}"):
+                delete_source(collection, src)
+                st.rerun()
     st.markdown("---")
-    st.markdown("### Workflow")
-    st.write("1. Upload PDF")
-    st.write("2. Extract text")
-    st.write("3. Chunk document")
-    st.write("4. Create embeddings")
-    st.write("5. Retrieve context")
-    st.write("6. Generate answer")
+    st.caption("Built with Streamlit, Ollama, ChromaDB")
 
 ollama_status = check_ollama()
 if ollama_status is None:
@@ -263,7 +287,8 @@ if uploaded_file:
                 tmp_file.write(uploaded_file.read())
                 temp_path = tmp_file.name
 
-            logger.info("Processing uploaded file: %s", uploaded_file.name)
+            source = uploaded_file.name
+            logger.info("Processing uploaded file: %s", source)
             text = extract_text_from_pdf(temp_path)
 
             if not text.strip():
@@ -272,20 +297,22 @@ if uploaded_file:
 
             chunks = split_into_chunks(text)
             embeddings = embed_chunks_concurrent(chunks)
+            from datetime import datetime, timezone
+            uploaded_at = datetime.now(timezone.utc).isoformat()
+            metadatas = [make_metadata(source, uploaded_at, i) for i in range(len(chunks))]
 
-            client = chromadb.PersistentClient(path=CHROMA_PATH)
-            try:
-                client.delete_collection(name=COLLECTION_NAME)
-            except chromadb.errors.NotFoundError:
-                pass
+            collection = get_chroma_collection()
+            existing = collection.get(where={"source": source})
+            if existing["ids"]:
+                collection.delete(ids=existing["ids"])
 
-            collection = client.create_collection(name=COLLECTION_NAME)
             collection.add(
                 documents=chunks,
                 embeddings=embeddings,
-                ids=[str(i) for i in range(len(chunks))]
+                ids=[f"{source}_chunk_{i}" for i in range(len(chunks))],
+                metadatas=metadatas
             )
-            logger.info("Stored %d chunks for %s", len(chunks), uploaded_file.name)
+            logger.info("Stored %d chunks for %s", len(chunks), source)
         except Exception as e:
             logger.exception("Failed to process document")
             st.error(f"Failed to process document: {e}")
@@ -294,14 +321,19 @@ if uploaded_file:
             if temp_path and os.path.exists(temp_path):
                 os.unlink(temp_path)
 
-    st.success("Document processed successfully. Ask a question below.")
+    st.success(f"'{uploaded_file.name}' processed successfully.")
+    st.rerun()
+
+# Query section — always visible if there are documents
+collection = get_chroma_collection()
+sources = list_sources(collection)
+
+if sources:
+    st.markdown('<div class="section-label">Ask a Question</div>', unsafe_allow_html=True)
 
     q1, q2 = st.columns([2, 1])
-
     with q1:
-        st.markdown('<div class="section-label">Ask a Question</div>', unsafe_allow_html=True)
-        query = st.text_input("Type your question about the uploaded PDF")
-
+        query = st.text_input("Type your question about the uploaded documents")
     with q2:
         st.markdown("""
         <div class="card">
@@ -326,9 +358,14 @@ if uploaded_file:
                 try:
                     logger.info("Query: %s", query)
                     query_embedding = embed_text(query)
-                    results = collection.query(query_embeddings=[query_embedding], n_results=3)
+                    results = collection.query(
+                        query_embeddings=[query_embedding],
+                        n_results=3,
+                        include=["documents", "metadatas"]
+                    )
 
                     docs = results.get("documents", [[]])
+                    metas = results.get("metadatas", [[]])
                     if not docs or not docs[0]:
                         st.warning("No relevant context found for your query.")
                         logger.warning("No results for query: %s", query)
@@ -341,7 +378,11 @@ if uploaded_file:
                         st.markdown(f'<div class="answer-box">{answer}</div>', unsafe_allow_html=True)
 
                         with st.expander("View Retrieved Context"):
-                            st.write(context)
+                            for chunk, meta in zip(docs[0], metas[0] or []):
+                                src = meta.get("source", "unknown") if meta else "unknown"
+                                st.caption(f"Source: {src}")
+                                st.write(chunk)
+                                st.divider()
                 except Exception as e:
                     logger.exception("Failed to generate answer")
                     st.error(f"Failed to generate answer: {e}")

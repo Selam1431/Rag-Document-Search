@@ -43,7 +43,7 @@ def embed_text(text: str) -> list:
 
 
 def embed_chunks_concurrent(chunks: list, max_workers: int = 4) -> list:
-    """Embed all chunks in parallel using a thread pool. Returns list of (index, embedding) sorted by index."""
+    """Embed all chunks in parallel using a thread pool. Returns embeddings in original order."""
     logger.info("Embedding %d chunks with %d workers", len(chunks), max_workers)
     t0 = time.time()
     results = [None] * len(chunks)
@@ -57,6 +57,10 @@ def embed_chunks_concurrent(chunks: list, max_workers: int = 4) -> list:
     elapsed = time.time() - t0
     logger.info("Embedded %d chunks in %.2fs", len(chunks), elapsed)
     return results
+
+
+def make_metadata(source: str, uploaded_at: str, chunk_index: int) -> dict:
+    return {"source": source, "uploaded_at": uploaded_at, "chunk_index": chunk_index}
 
 
 def build_prompt(context: str, query: str) -> str:
