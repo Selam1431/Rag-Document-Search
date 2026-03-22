@@ -68,6 +68,16 @@ st.markdown("""
     .source-tag {
         color: #6b7280; font-size: 0.82rem; margin-bottom: 0.2rem;
     }
+    .local-banner {
+        background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 12px;
+        padding: 0.9rem 1.2rem; margin-bottom: 1.2rem;
+        color: #166534; font-size: 0.9rem; line-height: 1.6;
+    }
+    .local-banner strong { color: #14532d; }
+    .local-banner code {
+        background: #dcfce7; border-radius: 4px;
+        padding: 0.1rem 0.35rem; font-size: 0.85rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -290,9 +300,23 @@ if backend_status is not True:
 
 st.markdown('<div class="main-title">AI Document Chat</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">Upload documents, ask questions, get grounded answers from a local LLM.</div>',
+    '<div class="main-subtitle">Upload documents, ask questions, get grounded answers from your documents.</div>',
     unsafe_allow_html=True
 )
+st.markdown("""
+<div class="local-banner">
+    💻 <strong>Want to run this yourself?</strong>
+    Clone the repo and run it locally — no account needed, fully private, works offline.<br>
+    <code>git clone https://github.com/Selam1431/Rag-Document-Search</code>
+    &nbsp;·&nbsp;
+    <code>pip install -r requirements.txt</code>
+    &nbsp;·&nbsp;
+    <code>streamlit run streamlit_app.py</code><br>
+    Requires <a href="https://ollama.com" target="_blank" style="color:#15803d;">Ollama</a> running locally with
+    <code>gemma3:4b</code> and <code>nomic-embed-text</code> models.
+    See the <a href="https://github.com/Selam1431/Rag-Document-Search#readme" target="_blank" style="color:#15803d;">README</a> for full setup instructions.
+</div>
+""", unsafe_allow_html=True)
 
 collection = get_collection()
 sources = list_sources(collection)
