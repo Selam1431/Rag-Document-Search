@@ -1,18 +1,25 @@
+import logging
 import os
 import re
 import tempfile
 
 import chromadb
-import ollama
 import requests
 import streamlit as st
-from pypdf import PdfReader
 
 from config import (
     CHROMA_PATH, COLLECTION_NAME, EMBED_MODEL, LLM_MODEL,
-    CHUNK_SIZE, CHUNK_OVERLAP, MAX_QUERY_LENGTH, MAX_FILE_SIZE_MB,
-    OLLAMA_BASE_URL
+    MAX_QUERY_LENGTH, MAX_FILE_SIZE_MB, OLLAMA_BASE_URL
 )
+from logger import setup_logging
+from rag_core import (
+    extract_text_from_pdf, split_into_chunks,
+    embed_chunks_concurrent, embed_text,
+    build_prompt, generate_answer
+)
+
+setup_logging()
+logger = logging.getLogger(__name__)
 
 PDF_MAGIC_BYTES = b"%PDF"
 
@@ -256,48 +263,31 @@ if uploaded_file:
                 tmp_file.write(uploaded_file.read())
                 temp_path = tmp_file.name
 
-            reader = PdfReader(temp_path)
-            text = ""
-
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text.replace("\n", " ") + " "
-
-            text = " ".join(text.split())
+            logger.info("Processing uploaded file: %s", uploaded_file.name)
+            text = extract_text_from_pdf(temp_path)
 
             if not text.strip():
                 st.error("Could not extract text from this PDF. It may be scanned or password-protected.")
                 st.stop()
 
-            chunks = []
-            start = 0
-            while start < len(text):
-                end = start + CHUNK_SIZE
-                chunks.append(text[start:end])
-                start += CHUNK_SIZE - CHUNK_OVERLAP
+            chunks = split_into_chunks(text)
+            embeddings = embed_chunks_concurrent(chunks)
 
             client = chromadb.PersistentClient(path=CHROMA_PATH)
-
             try:
                 client.delete_collection(name=COLLECTION_NAME)
             except chromadb.errors.NotFoundError:
                 pass
 
             collection = client.create_collection(name=COLLECTION_NAME)
-
-            for i, chunk in enumerate(chunks):
-                embedding = ollama.embeddings(
-                    model=EMBED_MODEL,
-                    prompt=chunk
-                )["embedding"]
-
-                collection.add(
-                    documents=[chunk],
-                    embeddings=[embedding],
-                    ids=[str(i)]
-                )
+            collection.add(
+                documents=chunks,
+                embeddings=embeddings,
+                ids=[str(i) for i in range(len(chunks))]
+            )
+            logger.info("Stored %d chunks for %s", len(chunks), uploaded_file.name)
         except Exception as e:
+            logger.exception("Failed to process document")
             st.error(f"Failed to process document: {e}")
             st.stop()
         finally:
@@ -334,38 +324,18 @@ if uploaded_file:
         else:
             with st.spinner("Searching and generating answer..."):
                 try:
-                    query_embedding = ollama.embeddings(
-                        model=EMBED_MODEL,
-                        prompt=query
-                    )["embedding"]
-
-                    results = collection.query(
-                        query_embeddings=[query_embedding],
-                        n_results=3
-                    )
+                    logger.info("Query: %s", query)
+                    query_embedding = embed_text(query)
+                    results = collection.query(query_embeddings=[query_embedding], n_results=3)
 
                     docs = results.get("documents", [[]])
                     if not docs or not docs[0]:
                         st.warning("No relevant context found for your query.")
+                        logger.warning("No results for query: %s", query)
                     else:
-                        retrieved_chunks = docs[0]
-                        context = "\n\n".join(retrieved_chunks)
-
-                        prompt = (
-                            "You are a helpful AI assistant.\n"
-                            "Answer the user's question using only the context below.\n"
-                            "Keep the answer clear, concise, and professional.\n"
-                            "If the context does not contain enough information, say so.\n\n"
-                            f"Context:\n{context}\n\n"
-                            f"Question:\n{query}"
-                        )
-
-                        response = ollama.chat(
-                            model=LLM_MODEL,
-                            messages=[{"role": "user", "content": prompt}]
-                        )
-
-                        answer = response["message"]["content"]
+                        context = "\n\n".join(docs[0])
+                        prompt = build_prompt(context, query)
+                        answer = generate_answer(prompt)
 
                         st.markdown('<div class="section-label">Answer</div>', unsafe_allow_html=True)
                         st.markdown(f'<div class="answer-box">{answer}</div>', unsafe_allow_html=True)
@@ -373,6 +343,7 @@ if uploaded_file:
                         with st.expander("View Retrieved Context"):
                             st.write(context)
                 except Exception as e:
+                    logger.exception("Failed to generate answer")
                     st.error(f"Failed to generate answer: {e}")
 
 st.markdown('<div class="footer-note">Built with Streamlit, Ollama, and ChromaDB</div>', unsafe_allow_html=True)

@@ -3,6 +3,9 @@ import sys
 import requests
 
 from config import OLLAMA_BASE_URL, EMBED_MODEL, LLM_MODEL
+from logger import setup_logging
+
+setup_logging()
 from load_documents import load_documents
 from embed_store import store_embeddings
 from chat_rag import ask_rag

@@ -1,22 +1,12 @@
+import logging
 import os
-from pypdf import PdfReader
+
+from rag_core import extract_text_from_pdf, split_into_chunks
+
+logger = logging.getLogger(__name__)
 
 
-def split_into_chunks(text, chunk_size=500, overlap=100):
-    chunks = []
-    text = " ".join(text.split())  # clean extra spaces/newlines
-
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        chunk = text[start:end]
-        chunks.append(chunk)
-        start += chunk_size - overlap
-
-    return chunks
-
-
-def load_documents(folder):
+def load_documents(folder: str) -> list:
     documents = []
 
     for file in os.listdir(folder):
@@ -25,29 +15,20 @@ def load_documents(folder):
         if file.endswith(".txt"):
             with open(path, "r", encoding="utf-8") as f:
                 text = f.read()
+            logger.info("Loaded text file: %s", file)
 
         elif file.endswith(".pdf"):
-            reader = PdfReader(path)
-            text = ""
-
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    clean_text = page_text.replace("\n", " ")
-                    text += clean_text + " "
+            text = extract_text_from_pdf(path)
+            logger.info("Loaded PDF: %s", file)
 
         else:
+            logger.debug("Skipping unsupported file: %s", file)
             continue
 
-        chunks = split_into_chunks(text, chunk_size=500, overlap=100)
+        chunks = split_into_chunks(text)
 
         for i, chunk in enumerate(chunks):
-            chunk = chunk.strip()
+            documents.append({"id": f"{file}_chunk_{i}", "text": chunk})
 
-            if chunk:
-                documents.append({
-                    "id": f"{file}_chunk_{i}",
-                    "text": chunk
-                })
-
+    logger.info("Loaded %d chunks from %s", len(documents), folder)
     return documents
