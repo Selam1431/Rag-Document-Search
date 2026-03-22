@@ -83,6 +83,20 @@ The CLI supports interactive multi-turn Q&A with streaming output. Place `.pdf`,
 python -m pytest tests/ -v
 ```
 
+### Docker
+
+```bash
+# Pull required Ollama models first (one-time setup inside the ollama container)
+docker compose up ollama -d
+docker compose exec ollama ollama pull gemma3:4b
+docker compose exec ollama ollama pull nomic-embed-text
+
+# Start everything
+docker compose up
+```
+
+The app will be available at `http://localhost:8501`. ChromaDB and Ollama model data are persisted in named Docker volumes.
+
 ---
 
 ## Configuration
@@ -99,5 +113,6 @@ All settings are in `.env`. Key options:
 | `MAX_QUERY_LENGTH` | `500` | Max query characters |
 | `RATE_LIMIT_PER_MINUTE` | `20` | Max queries per session per minute |
 | `APP_PASSWORD` | _(empty)_ | Set to enable password auth gate |
+| `MAX_HISTORY_TURNS` | `10` | Max conversation turns kept in LLM context |
 | `LOG_LEVEL` | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`) |
 | `CHROMA_PATH` | `./chroma_db` | Where ChromaDB persists data |

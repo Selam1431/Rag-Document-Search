@@ -70,3 +70,9 @@ python -m pytest tests/ -v
 ### Configuration
 
 All tunable values live in `.env` (gitignored) and are loaded once by `config.py`. `.env.example` is the committed template. Never hardcode model names, paths, or limits in module files — always import from `config`.
+
+Key variables: `LLM_MODEL`, `EMBED_MODEL`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `MAX_FILE_SIZE_MB`, `MAX_QUERY_LENGTH`, `RATE_LIMIT_PER_MINUTE`, `MAX_HISTORY_TURNS`, `APP_PASSWORD`, `LOG_LEVEL`, `CHROMA_PATH`, `OLLAMA_BASE_URL`.
+
+### Docker
+
+`Dockerfile` builds the app image. `docker-compose.yml` runs both the app and an Ollama container together with named volumes for ChromaDB and Ollama model data. `.dockerignore` excludes `.env`, `venv/`, `chroma_db/`, and `.git/` from the build context.

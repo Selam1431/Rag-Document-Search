@@ -1,0 +1,12 @@
+.env
+venv/
+chroma_db/
+.git/
+.github/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+tests/
+.claude/
+.streamlit/secrets.toml
