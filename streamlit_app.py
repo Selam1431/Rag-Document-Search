@@ -4,13 +4,29 @@ import tempfile
 
 import chromadb
 import ollama
+import requests
 import streamlit as st
 from pypdf import PdfReader
 
 from config import (
     CHROMA_PATH, COLLECTION_NAME, EMBED_MODEL, LLM_MODEL,
-    CHUNK_SIZE, CHUNK_OVERLAP, MAX_QUERY_LENGTH, MAX_FILE_SIZE_MB
+    CHUNK_SIZE, CHUNK_OVERLAP, MAX_QUERY_LENGTH, MAX_FILE_SIZE_MB,
+    OLLAMA_BASE_URL
 )
+
+PDF_MAGIC_BYTES = b"%PDF"
+
+
+def check_ollama():
+    try:
+        resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=3)
+        if resp.status_code != 200:
+            return False
+        models = [m["name"] for m in resp.json().get("models", [])]
+        missing = [m for m in (EMBED_MODEL, LLM_MODEL) if not any(m in name for name in models)]
+        return missing if missing else True
+    except requests.exceptions.ConnectionError:
+        return None
 
 st.set_page_config(
     page_title="AI Document Chat",
@@ -149,6 +165,20 @@ with st.sidebar:
     st.write("5. Retrieve context")
     st.write("6. Generate answer")
 
+ollama_status = check_ollama()
+if ollama_status is None:
+    st.error(
+        f"Cannot connect to Ollama at `{OLLAMA_BASE_URL}`. "
+        "Make sure Ollama is running: `ollama serve`"
+    )
+    st.stop()
+elif isinstance(ollama_status, list):
+    st.error(
+        f"Required Ollama models not found: {', '.join(ollama_status)}. "
+        f"Run: `ollama pull {' && ollama pull '.join(ollama_status)}`"
+    )
+    st.stop()
+
 st.markdown('<div class="main-title">AI Document Chat</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="main-subtitle">Upload a PDF, retrieve relevant context with embeddings, and generate grounded answers with a local LLM.</div>',
@@ -213,6 +243,11 @@ if uploaded_file:
     if uploaded_file.size > MAX_FILE_SIZE_MB * 1024 * 1024:
         st.error(f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB.")
         st.stop()
+
+    if uploaded_file.read(4) != PDF_MAGIC_BYTES:
+        st.error("Invalid file. Only real PDF files are accepted.")
+        st.stop()
+    uploaded_file.seek(0)
 
     with st.spinner("Processing document..."):
         temp_path = None
