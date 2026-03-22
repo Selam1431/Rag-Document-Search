@@ -1,315 +1,474 @@
-import streamlit as st
-import ollama
-import chromadb
-from pypdf import PdfReader
+import logging
+import os
+import re
 import tempfile
+from datetime import datetime, timezone
 
-st.set_page_config(
-    page_title="AI Document Chat",
-    page_icon="🤖",
-    layout="wide"
+import chromadb
+import requests
+import streamlit as st
+
+from config import (
+    CHROMA_PATH, COLLECTION_NAME, EMBED_MODEL, LLM_MODEL,
+    MAX_QUERY_LENGTH, MAX_FILE_SIZE_MB, OLLAMA_BASE_URL,
+    APP_PASSWORD, RATE_LIMIT_PER_MINUTE, MAX_HISTORY_TURNS,
+    GROQ_API_KEY, COHERE_API_KEY
 )
+from logger import setup_logging
+from rag_core import (
+    extract_text_from_pdf, split_into_chunks,
+    embed_chunks_concurrent, embed_text,
+    build_messages, make_metadata, stream_answer
+)
+
+setup_logging()
+logger = logging.getLogger(__name__)
+
+PDF_MAGIC = b"%PDF"
+DOCX_MAGIC = b"PK\x03\x04"
+
+try:
+    from docx import Document as DocxDocument
+    DOCX_SUPPORTED = True
+except ImportError:
+    DOCX_SUPPORTED = False
+
+# ── Page config ───────────────────────────────────────────────────────────────
+
+st.set_page_config(page_title="AI Document Chat", page_icon="🤖", layout="wide")
 
 st.markdown("""
 <style>
-    .stApp {
-        background: linear-gradient(135deg, #f8fafc, #eef2ff);
-    }
+    .stApp { background: linear-gradient(135deg, #f8fafc, #eef2ff); }
 
     .main-title {
-        font-size: 3.2rem;
-        font-weight: 800;
-        text-align: center;
-        color: #111827;
+        font-size: 2.6rem; font-weight: 800; text-align: center;
+        color: #111827; margin-bottom: 0.2rem;
+    }
+    .main-subtitle {
+        text-align: center; font-size: 1rem;
+        color: #4b5563; margin-bottom: 1.5rem;
+    }
+    .onboarding-card {
+        background: linear-gradient(135deg, #111827, #1e3a8a);
+        padding: 2.5rem; border-radius: 22px; color: white;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.15); margin-bottom: 1.5rem;
+    }
+    .onboarding-title { font-size: 1.8rem; font-weight: 800; margin-bottom: 0.8rem; }
+    .onboarding-step {
+        background: rgba(255,255,255,0.1); border-radius: 12px;
+        padding: 0.8rem 1rem; margin-bottom: 0.5rem; font-size: 0.95rem;
+    }
+    .score-badge {
+        display: inline-block; background: #eff6ff; color: #1d4ed8;
+        border: 1px solid #bfdbfe; border-radius: 8px;
+        padding: 0.1rem 0.5rem; font-size: 0.8rem; font-weight: 600;
         margin-bottom: 0.3rem;
     }
-
-    .main-subtitle {
-        text-align: center;
-        font-size: 1.1rem;
-        color: #4b5563;
-        margin-bottom: 2rem;
+    .source-tag {
+        color: #6b7280; font-size: 0.82rem; margin-bottom: 0.2rem;
     }
-
-    .hero-box {
-        background: linear-gradient(135deg, #111827, #1e3a8a);
-        padding: 2rem;
-        border-radius: 22px;
-        color: white;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.15);
-        margin-bottom: 2rem;
+    .local-banner {
+        background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 12px;
+        padding: 0.9rem 1.2rem; margin-bottom: 1.2rem;
+        color: #166534; font-size: 0.9rem; line-height: 1.6;
     }
-
-    .hero-title {
-        font-size: 2.2rem;
-        font-weight: 800;
-        margin-bottom: 0.5rem;
-    }
-
-    .hero-text {
-        font-size: 1rem;
-        color: #dbeafe;
-    }
-
-    .card {
-        background: white;
-        padding: 1.3rem;
-        border-radius: 18px;
-        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
-        border: 1px solid #e5e7eb;
-        margin-bottom: 1rem;
-    }
-
-    .card-title {
-        font-size: 1.1rem;
-        font-weight: 700;
-        color: #111827;
-        margin-bottom: 0.5rem;
-    }
-
-    .card-text {
-        color: #4b5563;
-        font-size: 0.96rem;
-        line-height: 1.6;
-    }
-
-    .answer-box {
-        background: linear-gradient(135deg, #ffffff, #f8fafc);
-        padding: 1.3rem;
-        border-radius: 18px;
-        border-left: 6px solid #2563eb;
-        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
-        color: #111827;
-        font-size: 1rem;
-        line-height: 1.7;
-        margin-top: 0.8rem;
-    }
-
-    .metric-box {
-        background: white;
-        border-radius: 18px;
-        padding: 1rem;
-        text-align: center;
-        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
-        border: 1px solid #e5e7eb;
-    }
-
-    .metric-number {
-        font-size: 1.6rem;
-        font-weight: 800;
-        color: #1d4ed8;
-    }
-
-    .metric-label {
-        color: #6b7280;
-        font-size: 0.9rem;
-    }
-
-    .section-label {
-        font-size: 1.2rem;
-        font-weight: 700;
-        color: #111827;
-        margin-top: 1rem;
-        margin-bottom: 0.7rem;
-    }
-
-    .footer-note {
-        text-align: center;
-        color: #6b7280;
-        font-size: 0.9rem;
-        margin-top: 2rem;
+    .local-banner strong { color: #14532d; }
+    .local-banner code {
+        background: #dcfce7; border-radius: 4px;
+        padding: 0.1rem 0.35rem; font-size: 0.85rem;
     }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def get_collection():
+    client = chromadb.PersistentClient(path=CHROMA_PATH)
+    try:
+        return client.get_collection(name=COLLECTION_NAME)
+    except chromadb.errors.NotFoundError:
+        return client.create_collection(name=COLLECTION_NAME)
+
+
+def list_sources(collection) -> list:
+    all_docs = collection.get(include=["metadatas"])
+    sources = {}
+    for meta in (all_docs.get("metadatas") or []):
+        if meta and "source" in meta:
+            sources[meta["source"]] = meta.get("uploaded_at", "")
+    return sorted(sources.items())
+
+
+def delete_source(collection, source: str):
+    existing = collection.get(where={"source": source})
+    if existing["ids"]:
+        collection.delete(ids=existing["ids"])
+        logger.info("Deleted %d chunks for: %s", len(existing["ids"]), source)
+
+
+def check_backends():
+    """Returns True if backends are ready, a str error message otherwise."""
+    # Read env vars fresh at call time (not from cached imports)
+    groq_key = os.environ.get("GROQ_API_KEY", "")
+    cohere_key = os.environ.get("COHERE_API_KEY", "")
+    if groq_key and cohere_key:
+        return True  # validated at query time; avoid slow startup checks
+
+    # Ollama mode
+    try:
+        resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=3)
+        if resp.status_code != 200:
+            return f"Ollama returned status {resp.status_code}."
+        models = [m["name"] for m in resp.json().get("models", [])]
+        missing = [m for m in (EMBED_MODEL, LLM_MODEL) if not any(m in n for n in models)]
+        if missing:
+            return (
+                f"Missing Ollama models: {', '.join(missing)}. "
+                f"Run: `ollama pull {' && ollama pull '.join(missing)}`"
+            )
+        return True
+    except requests.exceptions.ConnectionError:
+        return f"Cannot connect to Ollama at `{OLLAMA_BASE_URL}`. Run: `ollama serve`"
+
+
+def validate_file(uploaded_file):
+    if uploaded_file.size > MAX_FILE_SIZE_MB * 1024 * 1024:
+        return f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB."
+    header = uploaded_file.read(4)
+    uploaded_file.seek(0)
+    name = uploaded_file.name.lower()
+    if name.endswith(".pdf") and header != PDF_MAGIC:
+        return "Invalid PDF file."
+    if name.endswith(".docx") and header != DOCX_MAGIC:
+        return "Invalid DOCX file."
+    return None
+
+
+def extract_text(uploaded_file, temp_path: str) -> str:
+    if uploaded_file.name.lower().endswith(".pdf"):
+        return extract_text_from_pdf(temp_path)
+    if uploaded_file.name.lower().endswith(".docx") and DOCX_SUPPORTED:
+        doc = DocxDocument(temp_path)
+        return " ".join(p.text for p in doc.paragraphs if p.text.strip())
+    raise ValueError(f"Unsupported file type: {uploaded_file.name}")
+
+
+def get_page_count(uploaded_file, temp_path: str) -> int:
+    if uploaded_file.name.lower().endswith(".pdf"):
+        from pypdf import PdfReader
+        return len(PdfReader(temp_path).pages)
+    return 0
+
+# ── Session state init ────────────────────────────────────────────────────────
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "embedding_cache" not in st.session_state:
+    st.session_state.embedding_cache = {}
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = not APP_PASSWORD
+if "request_times" not in st.session_state:
+    st.session_state.request_times = []
+
+# ── Auth gate ─────────────────────────────────────────────────────────────────
+
+if not st.session_state.authenticated:
+    st.markdown('<div class="main-title">AI Document Chat</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-subtitle">Enter the password to continue.</div>', unsafe_allow_html=True)
+    pwd = st.text_input("Password", type="password")
+    if st.button("Sign in", type="primary"):
+        if pwd == APP_PASSWORD:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+
 with st.sidebar:
-    st.markdown("## 🤖 AI Document Chat")
-    st.write("A portfolio-ready RAG app for searching and chatting with PDF documents.")
+    st.markdown("### AI Document Chat")
     st.markdown("---")
-    st.markdown("### Tech Stack")
-    st.write("• Python")
-    st.write("• Ollama")
-    st.write("• ChromaDB")
-    st.write("• Streamlit")
-    st.write("• PyPDF")
+
+    accept = ["pdf", "docx"] if DOCX_SUPPORTED else ["pdf"]
+    uploaded_file = st.file_uploader(
+        "Upload a document",
+        type=accept,
+        help=f"PDF{' or DOCX' if DOCX_SUPPORTED else ''} · Max {MAX_FILE_SIZE_MB}MB"
+    )
+
+    if uploaded_file:
+        err = validate_file(uploaded_file)
+        if err:
+            st.error(err)
+        else:
+            if st.button("Process document", type="primary", use_container_width=True):
+                source = uploaded_file.name
+                temp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(source)[1]) as f:
+                        f.write(uploaded_file.read())
+                        temp_path = f.name
+
+                    logger.info("Processing: %s", source)
+                    text = extract_text(uploaded_file, temp_path)
+
+                    if not text.strip():
+                        st.error("No text could be extracted. The file may be scanned or protected.")
+                    else:
+                        page_count = get_page_count(uploaded_file, temp_path)
+                        chunks = split_into_chunks(text)
+
+                        progress_bar = st.progress(0, text="Embedding chunks…")
+                        status = st.empty()
+
+                        def on_progress(done, total):
+                            progress_bar.progress(done / total,
+                                text=f"Embedding chunk {done} of {total}…")
+                            status.caption(f"{done}/{total} chunks embedded")
+
+                        embeddings = embed_chunks_concurrent(chunks, progress_callback=on_progress)
+                        progress_bar.empty()
+                        status.empty()
+
+                        uploaded_at = datetime.now(timezone.utc).isoformat()
+                        metadatas = [make_metadata(source, uploaded_at, i) for i in range(len(chunks))]
+
+                        collection = get_collection()
+                        existing = collection.get(where={"source": source})
+                        if existing["ids"]:
+                            collection.delete(ids=existing["ids"])
+
+                        collection.add(
+                            documents=chunks,
+                            embeddings=embeddings,
+                            ids=[f"{source}_chunk_{i}" for i in range(len(chunks))],
+                            metadatas=metadatas
+                        )
+                        logger.info("Stored %d chunks for %s", len(chunks), source)
+
+                        info = f"**{source}** ready"
+                        if page_count:
+                            info += f" · {page_count} pages"
+                        info += f" · {len(chunks)} chunks"
+                        st.success(info)
+                        st.rerun()
+
+                except Exception as e:
+                    logger.exception("Failed to process document")
+                    st.error(f"Failed: {e}")
+                finally:
+                    if temp_path and os.path.exists(temp_path):
+                        os.unlink(temp_path)
+
     st.markdown("---")
-    st.markdown("### Workflow")
-    st.write("1. Upload PDF")
-    st.write("2. Extract text")
-    st.write("3. Chunk document")
-    st.write("4. Create embeddings")
-    st.write("5. Retrieve context")
-    st.write("6. Generate answer")
+    st.markdown("**Uploaded Documents**")
+    collection = get_collection()
+    sources = list_sources(collection)
+
+    if not sources:
+        st.caption("No documents yet.")
+    else:
+        for src, ts in sources:
+            c1, c2 = st.columns([3, 1])
+            c1.markdown(f"**{src}**")
+            if ts:
+                c1.caption(ts[:19].replace("T", " "))
+            if c2.button("✕", key=f"del_{src}", help=f"Remove {src}"):
+                delete_source(collection, src)
+                st.session_state.messages = []
+                st.rerun()
+
+    if sources and st.button("Clear chat history", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+    st.markdown("---")
+    if GROQ_API_KEY and COHERE_API_KEY:
+        from config import GROQ_MODEL
+        st.caption(f"LLM: {GROQ_MODEL} (Groq)  \nEmbed: embed-english-v3.0 (Cohere)")
+    else:
+        st.caption(f"LLM: {LLM_MODEL} (Ollama)  \nEmbed: {EMBED_MODEL} (Ollama)")
+
+# ── Ollama health check ───────────────────────────────────────────────────────
+
+backend_status = check_backends()
+if backend_status is not True:
+    st.error(backend_status)
+    st.stop()
+
+# ── Main area ─────────────────────────────────────────────────────────────────
 
 st.markdown('<div class="main-title">AI Document Chat</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">Upload a PDF, retrieve relevant context with embeddings, and generate grounded answers with a local LLM.</div>',
+    '<div class="main-subtitle">Upload documents, ask questions, get grounded answers from your documents.</div>',
     unsafe_allow_html=True
 )
-
 st.markdown("""
-<div class="hero-box">
-    <div class="hero-title">Retrieval-Augmented Generation Demo</div>
-    <div class="hero-text">
-        This app processes uploaded PDF documents, stores semantic embeddings in a vector database,
-        retrieves the most relevant chunks, and answers questions using a local language model.
-    </div>
+<div class="local-banner">
+    💻 <strong>Want to run this yourself?</strong>
+    Clone the repo and run it locally — no account needed, fully private, works offline.<br>
+    <code>git clone https://github.com/Selam1431/Rag-Document-Search</code>
+    &nbsp;·&nbsp;
+    <code>pip install -r requirements.txt</code>
+    &nbsp;·&nbsp;
+    <code>streamlit run streamlit_app.py</code><br>
+    Requires <a href="https://ollama.com" target="_blank" style="color:#15803d;">Ollama</a> running locally with
+    <code>gemma3:4b</code> and <code>nomic-embed-text</code> models.
+    See the <a href="https://github.com/Selam1431/Rag-Document-Search#readme" target="_blank" style="color:#15803d;">README</a> for full setup instructions.
 </div>
 """, unsafe_allow_html=True)
 
-top1, top2, top3 = st.columns(3)
+collection = get_collection()
+sources = list_sources(collection)
 
-with top1:
+# ── Empty state ───────────────────────────────────────────────────────────────
+
+if not sources:
     st.markdown("""
-    <div class="metric-box">
-        <div class="metric-number">PDF</div>
-        <div class="metric-label">Document Input</div>
+    <div class="onboarding-card">
+        <div class="onboarding-title">Get started</div>
+        <div class="onboarding-step">① Upload a PDF or DOCX using the sidebar</div>
+        <div class="onboarding-step">② Click <strong>Process document</strong> — chunks are embedded locally</div>
+        <div class="onboarding-step">③ Ask any question about your document in the chat</div>
+        <div class="onboarding-step">④ Answers stream in real time, grounded in your content</div>
     </div>
     """, unsafe_allow_html=True)
+    st.stop()
 
-with top2:
-    st.markdown("""
-    <div class="metric-box">
-        <div class="metric-number">RAG</div>
-        <div class="metric-label">Semantic Retrieval</div>
-    </div>
-    """, unsafe_allow_html=True)
+# ── Chat history ──────────────────────────────────────────────────────────────
 
-with top3:
-    st.markdown("""
-    <div class="metric-box">
-        <div class="metric-number">LLM</div>
-        <div class="metric-label">Generated Answers</div>
-    </div>
-    """, unsafe_allow_html=True)
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if msg["role"] == "assistant":
+            col_dl, col_ctx = st.columns([1, 4])
+            with col_dl:
+                st.download_button(
+                    "Download answer",
+                    data=msg["content"],
+                    file_name="answer.txt",
+                    mime="text/plain",
+                    key=f"dl_{id(msg)}",
+                )
+            if msg.get("context_chunks"):
+                with col_ctx:
+                    with st.expander("Retrieved context"):
+                        for chunk, src, score in zip(
+                            msg["context_chunks"],
+                            msg.get("context_sources", []),
+                            msg.get("context_scores", [])
+                        ):
+                            relevance = max(0.0, 1.0 - score) * 100
+                            st.markdown(
+                                f'<div class="score-badge">Relevance {relevance:.0f}%</div>'
+                                f'<div class="source-tag">Source: {src}</div>',
+                                unsafe_allow_html=True
+                            )
+                            st.write(chunk)
+                            st.divider()
 
-st.markdown('<div class="section-label">Upload Document</div>', unsafe_allow_html=True)
+# ── Chat input ────────────────────────────────────────────────────────────────
 
-left, right = st.columns([1.2, 1])
+query = st.chat_input(f"Ask a question about your documents… (max {MAX_QUERY_LENGTH} chars)")
 
-with left:
-    uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
+if query:
+    import time as _time
+    now = _time.time()
+    st.session_state.request_times = [t for t in st.session_state.request_times if now - t < 60]
 
-with right:
-    st.markdown("""
-    <div class="card">
-        <div class="card-title">How this app works</div>
-        <div class="card-text">
-            The uploaded PDF is converted into text, split into chunks, embedded using a local model,
-            stored in ChromaDB, and searched semantically to generate grounded answers.
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    if len(st.session_state.request_times) >= RATE_LIMIT_PER_MINUTE:
+        st.error(f"Rate limit reached ({RATE_LIMIT_PER_MINUTE} requests/min). Please wait a moment.")
+        st.stop()
 
-if uploaded_file:
-    with st.spinner("Processing document..."):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-            tmp_file.write(uploaded_file.read())
-            temp_path = tmp_file.name
+    st.session_state.request_times.append(now)
 
-        reader = PdfReader(temp_path)
-        text = ""
+    query = query.strip()
 
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text.replace("\n", " ") + " "
+    if len(query) > MAX_QUERY_LENGTH:
+        st.error(f"Query too long ({len(query)}/{MAX_QUERY_LENGTH} chars).")
+        st.stop()
+    if not re.search(r'\w', query):
+        st.error("Query must contain at least one word.")
+        st.stop()
 
-        text = " ".join(text.split())
+    # Display user message
+    with st.chat_message("user"):
+        st.markdown(query)
+    st.session_state.messages.append({"role": "user", "content": query})
+    logger.info("Query: %s", query)
 
-        chunk_size = 500
-        overlap = 100
-        chunks = []
+    # Embed query (with cache)
+    if query not in st.session_state.embedding_cache:
+        st.session_state.embedding_cache[query] = embed_text(query)
+    query_embedding = st.session_state.embedding_cache[query]
 
-        start = 0
-        while start < len(text):
-            end = start + chunk_size
-            chunk = text[start:end]
-            chunks.append(chunk)
-            start += chunk_size - overlap
+    # Retrieve
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=3,
+        include=["documents", "metadatas", "distances"]
+    )
 
-        client = chromadb.Client()
+    docs = results.get("documents", [[]])
+    metas = results.get("metadatas", [[]])
+    distances = results.get("distances", [[]])
 
-        try:
-            client.delete_collection(name="documents")
-        except:
-            pass
+    if not docs or not docs[0]:
+        with st.chat_message("assistant"):
+            st.warning("No relevant context found. Try rephrasing your question.")
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": "No relevant context found. Try rephrasing your question."
+        })
+        logger.warning("No results for query: %s", query)
+    else:
+        context_chunks = docs[0]
+        context_sources = [m.get("source", "unknown") if m else "unknown" for m in (metas[0] or [])]
+        context_scores = distances[0] if distances else []
+        context = "\n\n".join(context_chunks)
 
-        collection = client.create_collection(name="documents")
+        # Build conversation history — cap at MAX_HISTORY_TURNS pairs to avoid
+        # exceeding the model's context window on long conversations
+        prior = [
+            {"role": m["role"], "content": m["content"]}
+            for m in st.session_state.messages[:-1]
+            if m["role"] in ("user", "assistant")
+        ]
+        max_msgs = MAX_HISTORY_TURNS * 2  # each turn = 1 user + 1 assistant msg
+        history = prior[-max_msgs:] if len(prior) > max_msgs else prior
+        messages = build_messages(context, query, history)
 
-        for i, chunk in enumerate(chunks):
-            embedding = ollama.embeddings(
-                model="nomic-embed-text",
-                prompt=chunk
-            )["embedding"]
+        # Stream answer
+        with st.chat_message("assistant"):
+            answer = st.write_stream(stream_answer(messages))
 
-            collection.add(
-                documents=[chunk],
-                embeddings=[embedding],
-                ids=[str(i)]
-            )
+            col_dl, col_ctx = st.columns([1, 4])
+            with col_dl:
+                st.download_button(
+                    "Download answer",
+                    data=answer,
+                    file_name="answer.txt",
+                    mime="text/plain",
+                    key=f"dl_new_{len(st.session_state.messages)}",
+                )
+            with col_ctx:
+                with st.expander("Retrieved context"):
+                    for chunk, src, score in zip(context_chunks, context_sources, context_scores):
+                        relevance = max(0.0, 1.0 - score) * 100
+                        st.markdown(
+                            f'<div class="score-badge">Relevance {relevance:.0f}%</div>'
+                            f'<div class="source-tag">Source: {src}</div>',
+                            unsafe_allow_html=True
+                        )
+                        st.write(chunk)
+                        st.divider()
 
-    st.success("Document processed successfully. Ask a question below.")
-
-    q1, q2 = st.columns([2, 1])
-
-    with q1:
-        st.markdown('<div class="section-label">Ask a Question</div>', unsafe_allow_html=True)
-        query = st.text_input("Type your question about the uploaded PDF")
-
-    with q2:
-        st.markdown("""
-        <div class="card">
-            <div class="card-title">Suggested prompts</div>
-            <div class="card-text">
-                • Summarize this document<br>
-                • What are the main ideas?<br>
-                • What risks are mentioned?<br>
-                • What recommendations are given?
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    if query:
-        with st.spinner("Searching and generating answer..."):
-            query_embedding = ollama.embeddings(
-                model="nomic-embed-text",
-                prompt=query
-            )["embedding"]
-
-            results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=3
-            )
-
-            retrieved_chunks = results["documents"][0]
-            context = "\n\n".join(retrieved_chunks)
-
-            prompt = f"""
-You are a helpful AI assistant.
-Answer the user's question using only the context below.
-Keep the answer clear, concise, and professional.
-
-Context:
-{context}
-
-Question:
-{query}
-"""
-
-            response = ollama.chat(
-                model="gemma3:4b",
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-
-            answer = response["message"]["content"]
-
-        st.markdown('<div class="section-label">Answer</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="answer-box">{answer}</div>', unsafe_allow_html=True)
-
-        with st.expander("View Retrieved Context"):
-            st.write(context)
-
-st.markdown('<div class="footer-note">Built with Streamlit, Ollama, and ChromaDB</div>', unsafe_allow_html=True)
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": answer,
+            "context_chunks": context_chunks,
+            "context_sources": context_sources,
+            "context_scores": context_scores,
+        })
